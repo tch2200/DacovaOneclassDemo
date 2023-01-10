@@ -4,11 +4,11 @@
 ```
 pip install -r requirements.txt
 ```
-## 2. Run infer openvino-python
+## 2. Run infer openvino python
 ```
 python infer_openvino.py
 ```
-## 3. Run infer openvino-python
+## 3. Run infer onnx python
 ```
 python infer_onnx.py
 ```
