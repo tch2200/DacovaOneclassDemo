@@ -1,65 +1,58 @@
-import argparse, cv2, json
-from pathlib import Path
-import time
-import matplotlib.pyplot as plt
-
+import argparse, cv2, json, sys
 import numpy as np
-from openvino.runtime import Core, Layout , Type
-from openvino.preprocess import PrePostProcessor
+import logging as log
+from pathlib import Path
+from postprocessing import *
+import onnxruntime as rt
 
-from postprocessing import Tensor, predict_anomaly
+log.basicConfig(format='[ %(levelname)s ] %(message)s', level=log.INFO, stream=sys.stdout)
 
-class OpenVinoInfer:
-    def __init__(self, model_path, device='CPU'):
+class OnnxInfer:
+    def __init__(self, onnx_file, device='CPU'):
         """
         Args:
-            model_path (str): model .xml file                  
+            model_path (str): model .onnx file                        
         """
-        config_path = Path(model_path).with_suffix(".json")
+        config_path = Path(onnx_file).with_suffix(".json")
 
+        self.onnx_file = onnx_file
+        self.device = device.lower()
         self.config = self.load_config(config_path=config_path)
 
         self.input_size = self.config['preprocessing']['shape'][0]
         self.n_channels = 3 if self.config['preprocessing']['color_mode'] == "rgb" else 1
         
-        self.model = self.load_model(model_path, device)
+        self.model = self.__init_model()
         self.pre_process_config = self.config['preprocessing']
-        self.threshold = self.config['model_config']['infer_threshold']
-        
+        self.threshold = self.config['model_config']['infer_threshold']        
         self.min_area_ratio = self.config['model_config']['infer_min_area']
-        self.layout = 'NHWC'
+
+        self.input_name = self.model.get_inputs()[0].name
     
     def load_config(self, config_path):
         with open(config_path, 'r', encoding='utf8') as f:
             config = json.load(f)
         return config 
 
-    def load_model(self, model_path, device):
-        openvino_runtime_core = Core()
-        model = openvino_runtime_core.read_model(model_path)
+    def __init_model(self):
+        assert self.device in ["cpu", "gpu"], "{} not in allowed device list".format(
+            self.device
+        )
+        sess_options = rt.SessionOptions()
 
-        n, h, w, c = 1, self.input_size, self.input_size, self.n_channels
+        # Set graph optimization level
+        sess_options.graph_optimization_level = rt.GraphOptimizationLevel.ORT_ENABLE_ALL
+        session = rt.InferenceSession(
+            self.onnx_file,
+            sess_options=sess_options,
+            providers=[
+                "CPUExecutionProvider"
+                if self.device == "cpu"
+                else "CUDAExecutionProvider"
+            ],
+        )
 
-        ppp = PrePostProcessor(model)
-
-        # 1) Set input tensor information:
-        # - input() provides information about a single model input
-        # - reuse precision and shape from already available `input_tensor`
-        # - layout of data is 'NHWC'
-        ppp.input().tensor().set_element_type(Type.f32).set_layout(Layout('NHWC'))        
-
-        # 2) Here we suppose model has 'NHWC' layout for input
-        ppp.input().model().set_layout(Layout('NHWC'))
-
-        # 3) Set output tensor information:
-        # - precision of tensor is supposed to be 'f32'
-        ppp.output().tensor().set_element_type(Type.f32)
-
-        # 4) Apply preprocessing modifying the original 'model'
-        model = ppp.build()
-
-        compiled_model = openvino_runtime_core.compile_model(model, device)
-        return compiled_model
+        return session
 
     def pre_processing(self, img, imgsz=640):
         """ Preprocessing image:
@@ -83,14 +76,14 @@ class OpenVinoInfer:
             img = img[:, :, np.newaxis]   # gray image HWC (C=1)
         img = img.astype(np.float32)
         img *= self.pre_process_config['rescale']
-        
+                
         img = np.expand_dims(img, 0)   # NHWC
         
         return img, ori_img
 
     def post_processing(self, input, output, ori_img, min_area_ratio=None, threshold=None):
 
-        output = next(iter(output.values()))
+        output = output[0]
         shape = self.pre_process_config['shape']
         
         if min_area_ratio is None:
@@ -122,18 +115,17 @@ class OpenVinoInfer:
         else:
             return "normal", coco_result
 
+
     def __call__(self, image):
         """
+
         Args:
             image (np.ndarray): cv2 image (BGR)
         """
         # input_tensor : RGB image
-        input_tensor, ori_img = self.pre_processing(image, imgsz=self.input_size)
-        output = self.model.infer_new_request(
-            {
-                0: input_tensor
-            }
-        )        
+        input_tensor, ori_img = self.pre_processing(image, imgsz=self.input_size)        
+        output = self.model.run(None, {self.input_name: input_tensor})
+
         result = self.post_processing(
             input=input_tensor,
             output=output,
@@ -145,9 +137,9 @@ def parse_args():
     parser = argparse.ArgumentParser(description='')
     parser.add_argument(
         '--model', 
-        help='path to openvino .xml file',
+        help='path to openvino .onnx file',
         type=str, 
-        default= "weights/openvino/model_20221222_9229_664304.xml"
+        default= "weights/onnx/model_20221222_9229_664304.onnx"
     )
 
     parser.add_argument(
@@ -156,12 +148,13 @@ def parse_args():
         type=str,
         default="./examples/inputs/demo.png"
     )
+    
     return parser.parse_args()
 
 if __name__ == "__main__":
     args = parse_args()
-    infer = OpenVinoInfer(
-        model_path=args.model,        
+    infer = OnnxInfer(
+        onnx_file=args.model,        
         device='CPU',
     )        
 
@@ -169,6 +162,7 @@ if __name__ == "__main__":
         image = cv2.imread(args.image)
         start_time = time.time()
         _class, result = infer(image)
+
         print("Process time: {}".format(time.time() - start_time))
         print("Class pred: ", _class)        
         ### VISUALIZE RESULT ###
@@ -178,7 +172,7 @@ if __name__ == "__main__":
 
         image_bin = np.zeros_like(image)
         contours = [np.array(seg).reshape((-1, 2)) for seg in segment]
-        cv2.drawContours(image_bin, np.array(contours, dtype=object), -1, (255, 255, 255), 3)
+        cv2.drawContours(image_bin, np.array(contours), -1, (255, 255, 255), 3)
 
         image_draw_box = image.copy()
         [cv2.rectangle(image_draw_box, (box[0], box[1]), (box[2], box[3]), (255, 0, 0), 1) for box in bbox]
@@ -200,6 +194,6 @@ if __name__ == "__main__":
         axis[3].title.set_text("Predicted Bbox")
 
         figure.canvas.draw()
-        plt.savefig("examples/output_openvino_python/demo_python.png")
+        plt.savefig("examples/output_onnx_python/demo_python.png")
 
         break
