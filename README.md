@@ -1,15 +1,18 @@
 # Demo DacovaOneclass
 
-## 1. Install libs + download weight
+## 1. Install libs
 ```
 pip install -r requirements.txt
 ```
 ## 2. Run infer openvino-python
 ```
-sh scripts/infer.sh
+python infer_openvino.py
 ```
-
-## 3. Run infer openvino-cpp
+## 3. Run infer openvino-python
+```
+python infer_onnx.py
+```
+## 4. Run infer openvino-cpp
 ```
 docker build openvino_cpp -t openvino_oneclass
 docker run -it --rm -v $(pwd):/oneclass-openvino openvino_oneclass
@@ -18,7 +21,7 @@ cmake ../ -O ./
 make 
 ./main
 ```
-## 4. Run infer onnx-cpp
+## 5. Run infer onnx-cpp
 ```
 docker build onnx_cpp -t onnx_oneclass
 docker run -it --rm -v $(pwd):/oneclass-onnx onnx_oneclass
